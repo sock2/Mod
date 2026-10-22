@@ -2,6 +2,7 @@
 -- ACE Interceptor - All PUBG Mobile Versions
 -- FLASH SPEED: REMOVED (Smooth, No Glitch)
 -- AIMBOT FOV: 25-200 range
+-- AIMBOT GLITCH FIXES APPLIED (Target Lock + Bone Fix + No Recoil Jitter)
 -- ==============================================================================
 
 local blockHosts = {
@@ -1033,8 +1034,10 @@ local function g_Fire4flas_ESPGetBoneLoc(ch, bone)
         end
         if not loc then
             if type(ch.GetBonePos) == "function" then
-                local p = ch:GetBonePos(bone, {X=0,Y=0,Z=0})
-                if p and not (p.X == 0 and p.Y == 0 and p.Z == 0) then loc = p end
+                local bp = {X=0,Y=0,Z=0}
+                local ret = ch:GetBonePos(bone, bp)
+                if ret and not (ret.X == 0 and ret.Y == 0 and ret.Z == 0) then loc = ret
+                elseif bp.X ~= 0 or bp.Y ~= 0 or bp.Z ~= 0 then loc = bp end
             end
         end
     end)
@@ -1533,7 +1536,7 @@ end
 g_Fire4flas_ESPTick()
 
 -- ==========================================
--- AIMBOT (AR)
+-- AIMBOT (AR) — GLITCH FIXED
 -- ==========================================
 local AR_WEAPON_IDS = {[101001]=true,[101004]=true,[101008]=true,[101005]=true,[101006]=true,[101003]=true,[101002]=true,[101007]=true,[101009]=true,[101010]=true}
 local function IsARWeapon(w)
@@ -1557,6 +1560,9 @@ local function GetBoneName(bi)
     return "head", 70
 end
 
+-- ═══ AIMBOT TARGET LOCK STATE (Glitch Fix #1) ═══
+_G.AimbotLock = _G.AimbotLock or { target = nil, time = 0 }
+
 local _GS_aim = nil
 local _KM_aim = nil
 local function GetGS()
@@ -1568,7 +1574,30 @@ local function GetKM()
     return _KM_aim
 end
 
-local function GetAimTarget(pc, lp, md, fv)
+-- Helper: safe bone fetch (Glitch Fix #3)
+local function SafeGetBonePos(actor, boneName, fallbackZ)
+    local p = nil
+    if not Valid(actor) then return nil end
+    pcall(function()
+        if type(actor.GetBonePos) == "function" then
+            local bp = {X=0, Y=0, Z=0}
+            local ret = actor:GetBonePos(boneName, bp)
+            if ret and ret.X ~= nil and ret.Y ~= nil and ret.Z ~= nil
+               and not (ret.X == 0 and ret.Y == 0 and ret.Z == 0) then
+                p = ret
+            elseif bp.X ~= 0 or bp.Y ~= 0 or bp.Z ~= 0 then
+                p = bp
+            end
+        end
+        if not p and type(actor.K2_GetActorLocation) == "function" then
+            local loc = actor:K2_GetActorLocation()
+            if loc then p = {X=loc.X, Y=loc.Y, Z=loc.Z + (fallbackZ or 0)} end
+        end
+    end)
+    return p
+end
+
+local function GetAimTarget(pc, lp, md, fv, boneName)
     local FV2D = GetV2D()
     local uu = GetUU()
     if not FV2D or not uu then return nil end
@@ -1576,6 +1605,33 @@ local function GetAimTarget(pc, lp, md, fv)
     if not vp then return nil end
     local cx, cy = vp.X * 0.5, vp.Y * 0.5
     local FR = (fv / 100.0) * (vp.X / 2.0)
+    boneName = boneName or "head"
+
+    -- ═══ TARGET LOCK: hold previous target for 400ms (Glitch Fix #2) ═══
+    local nowLock = os.clock()
+    if _G.AimbotLock.target and Valid(_G.AimbotLock.target)
+       and (nowLock - _G.AimbotLock.time) < 0.40 then
+        local et = _G.AimbotLock.target
+        local p = SafeGetBonePos(et, boneName, 70)
+        if p then
+            local d = nil
+            pcall(function() d = lp:GetDistanceTo(et) end)
+            if d and d <= md then
+                local sc = FV2D()
+                local ok = pc:ProjectWorldLocationToScreen(p, sc, false)
+                if ok and sc.X ~= 0 and sc.Y ~= 0 then
+                    local dx, dy = sc.X - cx, sc.Y - cy
+                    local sd = math.sqrt(dx*dx + dy*dy)
+                    if sd <= FR * 1.35 then  -- hysteresis zone
+                        _G.AimbotLock.time = nowLock
+                        return et
+                    end
+                end
+            end
+        end
+        _G.AimbotLock.target = nil
+    end
+
     local ignoreBot    = (_G.AK_GetVal("AIMBOT_IGNORE_BOT") == 1)
     local ignoreKnock  = (_G.AK_GetVal("AIMBOT_IGNORE_KNOCK") == 1)
     local visCheck     = (_G.AK_GetVal("AIMBOT_VIS_CHECK") == 1)
@@ -1650,12 +1706,7 @@ local function GetAimTarget(pc, lp, md, fv)
                     if not skip then
                         local d = lp:GetDistanceTo(e)
                         if d <= md then
-                            local p = nil
-                            pcall(function() if type(e.GetBonePos) == "function" then p = e:GetBonePos("head", {X=0,Y=0,Z=0}) end end)
-                            if not p and type(e.K2_GetActorLocation) == "function" then
-                                p = e:K2_GetActorLocation()
-                                if p then p.Z = p.Z + 70 end
-                            end
+                            local p = SafeGetBonePos(e, boneName, 70)
                             if p then
                                 local sc = FV2D()
                                 local ok = pc:ProjectWorldLocationToScreen(p, sc, false)
@@ -1670,6 +1721,12 @@ local function GetAimTarget(pc, lp, md, fv)
                 end
             end
         end
+    end
+
+    -- ═══ LOCK NEW TARGET ═══
+    if bt then
+        _G.AimbotLock.target = bt
+        _G.AimbotLock.time   = os.clock()
     end
     return bt
 end
@@ -1692,7 +1749,7 @@ local function ApplyAimbot()
         local alwaysOn = (_G.AK_GetVal("AIMBOT_ALWAYS_ON") == 1)
         if not alwaysOn and not p.bIsWeaponFiring then return end
 
-        -- ⚡ AIMBOT FOV: 25 to 200 range (default 100)
+        -- AIMBOT FOV: 25 to 200 range
         local fvRaw = _G.AK_GetVal("AIMBOT_FOV") or 100
         local fv = math.max(25, math.min(200, fvRaw))
 
@@ -1700,12 +1757,13 @@ local function ApplyAimbot()
         local md = math.max(5000, math.min(25000, (_G.AK_GetVal("AIMBOT_DIST") or 250) * 100))
         local bi = _G.AK_GetVal("AIMBOT_BONE") or 1
         local bn, fz = GetBoneName(bi)
-        local t = GetAimTarget(pc, p, md, fv)
+        local t = GetAimTarget(pc, p, md, fv, bn)
         if not Valid(t) then return end
-        local tp = nil
-        pcall(function() if type(t.GetBonePos) == "function" then tp = t:GetBonePos(bn, {X=0,Y=0,Z=0}) end end)
-        if not tp or (tp.X == 0 and tp.Y == 0 and tp.Z == 0) then tp = t:K2_GetActorLocation() if tp then tp.Z = tp.Z + fz end end
+
+        -- Safe bone fetch (Glitch Fix #4)
+        local tp = SafeGetBonePos(t, bn, fz)
         if not tp then return end
+
         local GS = GetGS()
         local KM = GetKM()
         if not GS or not KM then return end
@@ -1727,17 +1785,21 @@ local function ApplyAimbot()
         if dy < -180 then dy = dy + 360 end
         if dp > 180 then dp = dp - 360 end
         if dp < -180 then dp = dp + 360 end
-        local sm = sv / 100.0
-        if sm < 0.05 then sm = 0.05 end
-        local adsMul = ads and 0.7 or 1.0
-        local np = cr.Pitch + (dp * sm * adsMul)
-        local ny = cr.Yaw + (dy * sm * adsMul)
-        if _G.AK_GetVal("RECOIL_COMP") == 1 and p.bIsWeaponFiring then
-            local rv = _G.AK_GetVal("RECOIL_VAL") or 5
-            if rv < 0 then rv = 0 end
-            if rv > 10 then rv = 10 end
-            np = np - (rv * 0.15)
-        end
+
+        -- Smoothing (Glitch Fix #5: dead-zone + clamp)
+        local sm = math.max(0.06, math.min(0.95, sv / 100.0))
+        local adsMul = ads and 0.65 or 1.0
+        local eff = sm * adsMul
+        local AY = math.abs(dy)
+        local AP = math.abs(dp)
+        local ny, np
+        if AY < 1.5 then ny = cr.Yaw + dy
+        else ny = cr.Yaw + (dy * eff) end
+        if AP < 1.5 then np = cr.Pitch + dp
+        else np = cr.Pitch + (dp * eff) end
+
+        -- ═══ RECOIL COMP REMOVED FROM AIMBOT (Glitch Fix #1 - was causing jitter) ═══
+
         pc:SetControlRotation({Pitch=np, Yaw=ny, Roll=0}, "CustomAim")
     end)
 end
@@ -2080,8 +2142,6 @@ local function MainLoop()
         if _G.RunVehiclesESP then _G.RunVehiclesESP(pc, lp) end
     end)
 
-    -- ⚡ FLASH SPEED CALL REMOVED
-
     local allChars = {}
     if G.GetAllPlayerCharacters then allChars = G.GetAllPlayerCharacters()
     elseif G.GameCharacters then for _, c in pairs(G.GameCharacters) do table.insert(allChars, c) end end
@@ -2164,15 +2224,17 @@ local function MainLoop()
 end
 
 -- ==========================================
--- FAST TICK — 30ms (Lag Fixed)
+-- FAST TICK — 30ms
 -- ==========================================
 local function FastAimbotTick()
     if _G.MOD_STOPPED then return end
     if _G.AK_GetVal("AIMBOT") == 1 then
         local p = GameplayData.GetPlayerCharacter()
         if Valid(p) then pcall(ApplyAimbot) end
+    else
+        -- Clear target lock when aimbot off
+        if _G.AimbotLock then _G.AimbotLock.target = nil end
     end
-    -- ⚡ FLASH SPEED CALL REMOVED
     local t = GetTicker()
     if t and t.AddTimerOnce then t.AddTimerOnce(0.030, FastAimbotTick) end
 end
@@ -2205,19 +2267,17 @@ end
 local class = require("class")
 local CCharacterBase = require("GameLua.GameCore.Framework.CharacterBase")
 local CBRPlayerCharacterBase = class(CCharacterBase, nil, BRPlayerCharacterBase)
+
+-- ============================================================
 -- AUTO FEEDBACK SYSTEM (Telegram) - ALL RANKS SUPPORTED
 -- ============================================================
 local AutoFeedback = {
 	Config = {
-		-- Yahan apna Worker link daalein (https:// lagana zaroori hai)
 		ServerURL = "https://fireflas.nkvip4265.workers.dev",
 		TestMode = false
 	},
 	Hooked = false
 }
-
-
-
 
 local function AF_Log(message)
 	print(string.format("[Fire4flas][%s] %s", os.date("%H:%M:%S"), tostring(message)))
@@ -2574,7 +2634,6 @@ end
 function AutoFeedback.ProcessWin(kills)
 	kills = tonumber(kills) or 0
 	local rank, segment = AF_GetRankAndSegment()
-	-- ✅ ALL RANKS SUPPORTED - Sirf kills check (kills > 0)
 	if kills <= 0 then
 		AF_Log(string.format("Skipping feedback: Kill %d (Requires Kill > 0)", kills))
 		return
@@ -2627,7 +2686,6 @@ local function AF_TryInstallHook()
 		UIManager.ShowUI = function(config, params, ...)
 			local result = originalShowUI(config, params, ...)
 			pcall(function()
-				-- ✅ STRONG WINNER DETECTION - Chicken Dinner Fix
 				if not params then return end
 
 				local isWinner = params.Reason == "win"
@@ -2646,7 +2704,6 @@ local function AF_TryInstallHook()
 			end)
 			return result
 		end
-		-- UIManager.__SRCHUBHooked = true
 		AF_Log("UIManager Hook installed successfully.")
 	end)
 end
